@@ -1,0 +1,27 @@
+{
+  "name": "ghoul_hunters_server",
+  "version": "1.0.0",
+  "description": "\"# Alexa_Skill-Ghoul_Hunters-Test_Server\"",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "nodemon --exec babel-node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scorchio36/Alexa_Skill-Ghoul_Hunters-Test_Server.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/scorchio36/Alexa_Skill-Ghoul_Hunters-Test_Server/issues"
+  },
+  "homepage": "https://github.com/scorchio36/Alexa_Skill-Ghoul_Hunters-Test_Server#readme",
+  "devDependencies": {
+    "@babel/core": "^7.12.3",
+    "@babel/node": "^7.12.1",
+    "@babel/preset-env": "^7.12.1",
+    "babel-cli": "^6.26.0",
+    "nodemon": "^2.0.6"
+  }
+}
