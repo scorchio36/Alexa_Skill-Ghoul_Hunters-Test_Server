@@ -23,5 +23,8 @@
     "@babel/preset-env": "^7.12.1",
     "babel-cli": "^6.26.0",
     "nodemon": "^2.0.6"
+  },
+  "dependencies": {
+    "ws": "^7.3.1"
   }
 }
