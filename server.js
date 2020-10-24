@@ -2,8 +2,16 @@ import ClientState from './ClientState.js';
 
 const http = require('http');
 const url = require('url');
+const uniqid = require('uniqid');
 const WebSocket = require('ws');
 let generateRandomRoomID = require('./RoomIDGenerator.js');
+
+/***** I am introducing some terminology here:
+
+Similar Clients: clients within the same room as the current Client
+
+This will make naming my functions easier... *****/
+
 
 
 const SERVER_PORT = 8080;
@@ -35,17 +43,97 @@ function handleWS_onConnection(websocket, request) {
 
   console.log(`(+(${new Date()}) Connection to ${request.socket.remoteAddress} accepted.`);
 
+  // client ID will be generated server-side
+  let newClientID = uniqid();
+
+  // it may be better to create a ClientState on connection, let's try that here
+  activeClientStates.push(new ClientState(newClientID, null, null, websocket));
+
   // register message, error, and close handlers with websocket object
   websocket.on('message', handleWS_onMessage);
   websocket.on('error', handleWS_onError);
   websocket.on('close', handleWS_onClose);
 
-  websocketConnection = websocket;
+  // let the client know what their new ID will be
+  websocket.send(JSON.stringify({
+    action: "client_id_and_ws_connection_created",
+    clientID: newClientID
+  }));
 }
 
 function handleWS_onMessage(message) {
+
+  let jsonPayload = JSON.parse(message);
+  let currentClientState = getClientState(jsonPayload.clientID);
+
   console.log(`(${new Date()}) Message received: ${message}`);
-  websocketConnection.send(`Your message, ${message}, was received. Thank you.`);
+
+
+  /* Similar to the client's conditional action monitoring, this set of
+  conditionals within the handleWS_onMessage function check the incoming action
+  from the client, perform operations according the intercepted action, and return
+  any necessary results to the client. */
+  if(jsonPayload.action == "create_room") {
+
+    // The client is creating a new room, so generate a new room ID
+    let newRoomID = generateRandomRoomID();
+    while (activeRoomIDs.includes(newRoomID)) { // don't repeat room IDs
+      newRoomID = generateRandomRoomID();
+    }
+
+    // add the new roomID to the tracking array and update the current ClientState's roomID
+    activeRoomIDs.push(newRoomID);
+    currentClientState.roomID = newRoomID;
+
+    // let the client know the operation was successful and give them the new RoomID
+    currentClientState.websocketConnection.send(JSON.stringify({
+      action: "create_room_successful",
+      roomID: newRoomID
+    }));
+  }
+
+
+  // a new client has requested to join a room
+  if(jsonPayload.action == "join_room") {
+
+    /* Since the client is joining a room, make sure that the given roomID is active.
+    If it is not active, let the client know. */
+    if (!(activeRoomIDs.includes(jsonPayload.roomID))) {
+        // send back a response saying that the roomID is invalid
+        currentClientState.websocketConnection.send(JSON.stringify({
+          action: "join_room_failed"
+        }));
+    }
+    else {
+
+      //If the room is valid, update the RoomID of the current ClientState
+      currentClientState.roomID = jsonPayload.roomID;
+
+      /* Let each similar client know that a new player has joined their room. This
+      allows each similar client to keep track of each other and allows UI to be
+      properly updated on the client side. */
+      let similarClientStates = getSimilarClientStates(currentClientState.clientID);
+      for (let clientState of similarClientStates) {
+        clientState.websocketConnection.send(JSON.stringify({
+          action: "new_client_joined_room",
+          similarClientID: currentClientState.clientID
+        }));
+
+
+      }
+
+      /* Return a list of similar clients to the current client, so the current
+      client may properly update it's UI and know which clients are in the room
+      that was just joined */
+      currentClientState.websocketConnection.send(JSON.stringify({
+        action: "join_room_successful",
+        roomID: currentClientState.roomID,
+        similarClients: getSimilarClientIDs(currentClientState.clientID)
+      }));
+    }
+  }
+
+
 }
 
 function handleWS_onError(err) {
@@ -55,6 +143,56 @@ function handleWS_onError(err) {
 function handleWS_onClose(reasonCode, description, connection) {
   console.log((new Date()) + ': Connection closed.');
 }
+
+
+// Retrieve a ClientState that matches the given clientID
+// Clean this up with For...of loops later...
+function getClientState(clientID) {
+  for (let i=0; i<activeClientStates.length; i++) {
+    if (activeClientStates[i].clientID == clientID) {
+      return activeClientStates[i];
+    }
+  }
+}
+
+
+/* Return a list of a ClientStates mactching the given roomID, except for the
+ClientState that has the same clientID that was passed in as an input param. */
+function getSimilarClientStates(clientID) {
+
+  let similarClientStates = [];
+  let currentClientState = getClientState(clientID);
+
+  for (let i=0; i<activeClientStates.length; i++) {
+
+    // we want to include every ClientState with the same roomID except for the one with the given clientID
+    if (activeClientStates[i].roomID == currentClientState.roomID && activeClientStates[i].clientID != clientID) {
+      similarClientStates.push(activeClientStates[i]);
+    }
+  }
+
+  return similarClientStates;
+}
+
+/* Return a list of a Client IDs corresponding to matching the given roomID. Every
+matching client ID is returned except for the client ID that was passed into the
+function. */
+function getSimilarClientIDs(clientID) {
+
+  let similarClientIDs = [];
+  let currentClientState = getClientState(clientID);
+
+  for (let i=0; i<activeClientStates.length; i++) {
+
+    // we want to include every ClientState with the same roomID except for the one with the given clientID
+    if (activeClientStates[i].roomID == currentClientState.roomID && activeClientStates[i].clientID != clientID) {
+      similarClientIDs.push(activeClientStates[i].clientID);
+    }
+  }
+
+  return similarClientIDs;
+}
+
 
 
 
@@ -70,18 +208,7 @@ function handleWS_onClose(reasonCode, description, connection) {
     // "Host a game" button is pressed on the client side
     if(pathname === "/create_room") {
 
-      // The client is creating a new room, so generate a new room ID
-      let newRoomID = generateRandomRoomID();
-      while (activeRoomIDs.includes(newRoomID)) { // don't repeat room IDs
-        newRoomID = generateRandomRoomID();
-      }
 
-      // Create a new ClientState object to keep track of the current client
-      let newClientState = new ClientState(query.clientID, newRoomID, null);
-
-      // add a new ClientState object and the new roomID to the tracking arrays
-      activeRoomIDs.push(newRoomID);
-      activeClientStates.push(new ClientState(query.clientID, newRoomID, null));
 
       // Let the client-side know that the operation was successful
       res.writeHead(200, { 'Content-Type': 'application/json' });
