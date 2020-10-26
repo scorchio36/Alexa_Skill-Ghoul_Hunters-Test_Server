@@ -47,7 +47,7 @@ function handleWS_onConnection(websocket, request) {
   let newClientID = uniqid();
 
   // it may be better to create a ClientState on connection, let's try that here
-  activeClientStates.push(new ClientState(newClientID, null, null, websocket));
+  activeClientStates.push(new ClientState(newClientID, null, null, websocket, "player"));
 
   // register message, error, and close handlers with websocket object
   websocket.on('message', handleWS_onMessage);
@@ -134,6 +134,101 @@ function handleWS_onMessage(message) {
   }
 
 
+
+
+  if (jsonPayload.action == "start_game") {
+
+    /* We will need all the similar clients to update their roles and alert them
+    that the game has started */
+    let similarClientStates = getSimilarClientStates(currentClientState.clientID);
+    console.log(similarClientStates.length);
+    let currentAndSimilarClientStates = similarClientStates.concat(currentClientState);
+    console.log(currentAndSimilarClientStates[currentAndSimilarClientStates.length-1]);
+    // randomly assign one of the clients to be a ghoul
+    let randomGhoulIndex = Math.floor(Math.random() * (currentAndSimilarClientStates.length + 1)); // add 1 to account for the currenClient
+    currentAndSimilarClientStates[randomGhoulIndex].role = "ghoul";
+
+    // let each similar client know their role and alert them of game start
+    for (let clientState of similarClientStates) {
+      clientState.websocketConnection.send(JSON.stringify({
+        action: "game_started",
+        role: clientState.role
+      }));
+    }
+
+    // alert the current client and also tell the client his role
+    currentClientState.websocketConnection.send(JSON.stringify({
+      action: "game_started",
+      role: currentClientState.role
+    }));
+
+  }
+
+
+  // ghoul has hidden the treasure. Let users know that they can now play and move around
+  if (jsonPayload.action == "treasure_hidden") {
+
+    let similarClientStates = getSimilarClientStates(currentClientState.clientID);
+
+    // let each similar client know their role and alert them of game start
+    for (let clientState of similarClientStates) {
+      clientState.websocketConnection.send(JSON.stringify({
+        action: "allow_player_movement"
+      }));
+    }
+
+    // alert the current client and also tell the client his role
+    currentClientState.websocketConnection.send(JSON.stringify({
+      action: "allow_player_movement"
+    }));
+  }
+
+
+
+
+  /* If a player moves, update the location in their respective ClientState.
+  Also, check if a player and ghoul's location coincide with each other. If they
+  do, then let the ghoul know he killed a player, and the player know that they
+  died. */
+  if (jsonPayload.action == "update_location") {
+
+    currentClientState.location = jsonPayload.location;
+
+    // if the player is the ghoul, compare their location with all players
+    let similarClientState = null;
+    if (currentClientState.role == "ghoul") {
+      for (let similarClientID of jsonPayload.similarClients) {
+        similarClientState = getClientState(similarClientID);
+        if (similarClientState.location == currentClientState.location) { //let player know they were killed
+          similarClientState.websocketConnection.send(JSON.stringify({
+            action: "killed_by_ghoul"
+          }));
+          currentClientState.websocketConnection.send(JSON.stringify({ //let ghoul know he killed someone
+            action: "killed_a_player",
+            killedClient: similarClientState.clientID
+          }));
+        }
+      }
+    }
+    // if the player is not a ghoul, compare their location to the ghoul
+    else {
+      let ghoulClientState = null;
+      for(let similarClientID of jsonPayload.similarClients) {
+        ghoulClientState = getClientState(similarClientID);
+        if (ghoulClientState.role == "ghoul") {
+          if (currentClientState.location == ghoulClientState.location) {
+            currentClientState.websocketConnection.send(JSON.stringify({
+              action: "killed_by_ghoul"
+            }));
+            ghoulClientState.websocketConnection.send(JSON.stringify({ //let ghoul know he killed someone
+              action: "killed_a_player",
+              killedClient: similarClientState.clientID
+            }));
+          }
+        }
+      }
+    }
+  }
 }
 
 function handleWS_onError(err) {
