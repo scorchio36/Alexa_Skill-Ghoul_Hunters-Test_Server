@@ -1,4 +1,5 @@
 import ClientState from './ClientState.js';
+import GameState from './GameState.js';
 
 const http = require('http');
 const url = require('url');
@@ -20,6 +21,10 @@ let payload_storage = null;
 let activeRoomIDs = [];
 let activeClientStates = [];
 let websocketConnection = null; //stores the websocket object returned by on 'connection'
+
+/*gameStates holds all of the available GameState objects. They will be indexed
+by the roomID. */
+let gameStates = new Map();
 
 // Set up the HTTP server needed for WS
 let server = http.createServer(function(req, res) {
@@ -81,6 +86,11 @@ function handleWS_onMessage(message) {
       newRoomID = generateRandomRoomID();
     }
 
+    /* Create a new GameState object to go along with the new RoomID. Add the
+    client that created a room to the GameState's ClientStates list. */
+    gameStates.set(newRoomID, new GameState());
+    gameStates.get(newRoomID).addClientState(currentClientState);
+
     // add the new roomID to the tracking array and update the current ClientState's roomID
     activeRoomIDs.push(newRoomID);
     currentClientState.roomID = newRoomID;
@@ -108,6 +118,9 @@ function handleWS_onMessage(message) {
 
       //If the room is valid, update the RoomID of the current ClientState
       currentClientState.roomID = jsonPayload.roomID;
+
+      //add client to the correct gameState
+      gameStates.get(jsonPayload.roomID).addClientState(currentClientState);
 
       /* Let each similar client know that a new player has joined their room. This
       allows each similar client to keep track of each other and allows UI to be
@@ -145,8 +158,13 @@ function handleWS_onMessage(message) {
     let currentAndSimilarClientStates = similarClientStates.concat(currentClientState);
     console.log(currentAndSimilarClientStates[currentAndSimilarClientStates.length-1]);
     // randomly assign one of the clients to be a ghoul
-    let randomGhoulIndex = Math.floor(Math.random() * (currentAndSimilarClientStates.length + 1)); // add 1 to account for the currenClient
+    let randomGhoulIndex = Math.floor(Math.random() * (currentAndSimilarClientStates.length)); // add 1 to account for the currenClient
+    console.log(`RandomGhoulIndex: ${randomGhoulIndex}`);
     currentAndSimilarClientStates[randomGhoulIndex].role = "ghoul";
+
+    //initialize remainingPlayers property in GameState
+    let gameState = gameStates.get(currentClientState.roomID);
+    gameState.remainingPlayers = gameState.clientStates.size - 1; //-2 because ghoul is not a remiaining player
 
     // let each similar client know their role and alert them of game start
     for (let clientState of similarClientStates) {
@@ -173,13 +191,15 @@ function handleWS_onMessage(message) {
     // let each similar client know their role and alert them of game start
     for (let clientState of similarClientStates) {
       clientState.websocketConnection.send(JSON.stringify({
-        action: "allow_player_movement"
+        action: "allow_player_movement",
+        searchable: jsonPayload.searchable
       }));
     }
 
     // alert the current client and also tell the client his role
     currentClientState.websocketConnection.send(JSON.stringify({
-      action: "allow_player_movement"
+      action: "allow_player_movement",
+      searchable: jsonPayload.searchable
     }));
   }
 
@@ -193,6 +213,7 @@ function handleWS_onMessage(message) {
   if (jsonPayload.action == "update_location") {
 
     currentClientState.location = jsonPayload.location;
+    let gameState = gameStates.get(currentClientState.roomID);
 
     // if the player is the ghoul, compare their location with all players
     let similarClientState = null;
@@ -207,6 +228,9 @@ function handleWS_onMessage(message) {
             action: "killed_a_player",
             killedClient: similarClientState.clientID
           }));
+
+          // decrement remainingPlayers each time ghoul kills a player
+          gameState.remainingPlayers--;
         }
       }
     }
@@ -217,18 +241,81 @@ function handleWS_onMessage(message) {
         ghoulClientState = getClientState(similarClientID);
         if (ghoulClientState.role == "ghoul") {
           if (currentClientState.location == ghoulClientState.location) {
-            currentClientState.websocketConnection.send(JSON.stringify({
+            currentClientState.websocketConnection.send(JSON.stringify({ //let player know they were killed
               action: "killed_by_ghoul"
             }));
             ghoulClientState.websocketConnection.send(JSON.stringify({ //let ghoul know he killed someone
               action: "killed_a_player",
               killedClient: similarClientState.clientID
             }));
+            gameState.remainingPlayers--;
           }
         }
       }
     }
+
+    if(gameState.remainingPlayers == 0) {
+      let similarClientStates = getSimilarClientStates(currentClientState.clientID);
+      //let all clients know that the game is over
+      for (let similarClientState of similarClientStates) {
+        if (similarClientState.role == "ghoul")
+          similarClientState.websocketConnection.send(JSON.stringify({
+            action: "game_over_ghoul_wins",
+            isWinner: true
+          }));
+        else {
+          similarClientState.websocketConnection.send(JSON.stringify({
+            action: "game_over_ghoul_wins",
+            isWinner: false
+          }));
+        }
+      }
+
+      if (currentClientState.role == "ghoul") {
+        currentClientState.websocketConnection.send(JSON.stringify({
+          action: "game_over_ghoul_wins",
+          isWinner: true
+        }));
+      }
+      else {
+        currentClientState.websocketConnection.send(JSON.stringify({
+          action: "game_over_ghoul_wins",
+          isWinner: false
+        }));
+      }
+
+    }
+
   }
+
+
+
+  if (jsonPayload.action == "player_wins") {
+
+    let similarClientStates = getSimilarClientStates(currentClientState.clientID);
+    currentClientState.websocketConnection.send(JSON.stringify({
+      action: "game_over_player_wins",
+      isWinner: true
+    }));
+
+    for (let clientState of similarClientStates) {
+
+
+      if (clientState.role == "ghoul") {
+        clientState.websocketConnection.send(JSON.stringify({
+          action: "game_over_player_wins",
+          isWinner: false
+        }));
+      }
+      else {
+        clientState.websocketConnection.send(JSON.stringify({
+          action: "game_over_player_wins",
+          isWinner: true
+        }));
+      }
+    }
+  }
+
 }
 
 function handleWS_onError(err) {
