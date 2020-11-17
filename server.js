@@ -22,9 +22,9 @@ let activeRoomIDs = [];
 let activeClientStates = [];
 let websocketConnection = null; //stores the websocket object returned by on 'connection'
 
-/*gameStates holds all of the available GameState objects. They will be indexed
-by the roomID. */
-let gameStates = new Map();
+
+let roomID2GameStateMapping = new Map();
+let clientID2RoomMapping = new Map();
 
 // Set up the HTTP server needed for WS
 let server = http.createServer(function(req, res) {
@@ -69,7 +69,16 @@ function handleWS_onConnection(websocket, request) {
 function handleWS_onMessage(message) {
 
   let jsonPayload = JSON.parse(message);
-  let currentClientState = getClientState(jsonPayload.clientID);
+  let currentRoomID = clientID2RoomMapping.get(jsonPayload.clientID);
+  let currentClientState = null;
+  let currentGameState = null;
+  if (currentRoomID) {
+    currentGameState = roomID2GameStateMapping.get(currentRoomID);
+    currentClientState = currentGameState.getClientState(jsonPayload.clientID);
+  }
+  else {
+    currentClientState = getClientState(jsonPayload.clientID);
+  }
 
   console.log(`(${new Date()}) Message received: ${message}`);
 
@@ -88,8 +97,11 @@ function handleWS_onMessage(message) {
 
     /* Create a new GameState object to go along with the new RoomID. Add the
     client that created a room to the GameState's ClientStates list. */
-    gameStates.set(newRoomID, new GameState());
-    gameStates.get(newRoomID).addClientState(currentClientState);
+    roomID2GameStateMapping.set(newRoomID, new GameState());
+    roomID2GameStateMapping.get(newRoomID).addClientState(currentClientState);
+    roomID2GameStateMapping.get(newRoomID).addClient(currentClientState.clientID);
+    roomID2GameStateMapping.remainingPlayers++;
+    clientID2RoomMapping.set(jsonPayload.clientID, newRoomID);
 
     // add the new roomID to the tracking array and update the current ClientState's roomID
     activeRoomIDs.push(newRoomID);
@@ -116,24 +128,30 @@ function handleWS_onMessage(message) {
     }
     else {
 
-      //If the room is valid, update the RoomID of the current ClientState
-      currentClientState.roomID = jsonPayload.roomID;
+      // grab the gameState based on the roomID passed in
+      currentGameState = roomID2GameStateMapping.get(jsonPayload.roomID);
 
-      //add client to the correct gameState
-      gameStates.get(jsonPayload.roomID).addClientState(currentClientState);
+      // If the room is valid, update the RoomID of the current ClientState and
+      // add the clientState to the gameState and roomID mapping
+      currentClientState.roomID = jsonPayload.roomID;
+      currentGameState.addClientState(currentClientState);
+      currentGameState.addClient(currentClientState.clientID);
+      currentGameState.remainingPlayers++;
+      clientID2RoomMapping.set(jsonPayload.clientID, jsonPayload.roomID);
+
 
       /* Let each similar client know that a new player has joined their room. This
       allows each similar client to keep track of each other and allows UI to be
       properly updated on the client side. */
-      let similarClientStates = getSimilarClientStates(currentClientState.clientID);
-      for (let clientState of similarClientStates) {
+      let similarClientStates = currentGameState.getSimilarClientStates(currentClientState.clientID);
+      console.log(similarClientStates);
+      similarClientStates.map(function(clientState) {
         clientState.websocketConnection.send(JSON.stringify({
           action: "new_client_joined_room",
           similarClientID: currentClientState.clientID
         }));
+      });
 
-
-      }
 
       /* Return a list of similar clients to the current client, so the current
       client may properly update it's UI and know which clients are in the room
@@ -153,26 +171,22 @@ function handleWS_onMessage(message) {
 
     /* We will need all the similar clients to update their roles and alert them
     that the game has started */
-    let similarClientStates = getSimilarClientStates(currentClientState.clientID);
-    console.log(similarClientStates.length);
+    let similarClientStates = currentGameState.getSimilarClientStates(currentClientState.clientID);
     let currentAndSimilarClientStates = similarClientStates.concat(currentClientState);
-    console.log(currentAndSimilarClientStates[currentAndSimilarClientStates.length-1]);
+
     // randomly assign one of the clients to be a ghoul
-    let randomGhoulIndex = Math.floor(Math.random() * (currentAndSimilarClientStates.length)); // add 1 to account for the currenClient
-    console.log(`RandomGhoulIndex: ${randomGhoulIndex}`);
-    currentAndSimilarClientStates[randomGhoulIndex].role = "ghoul";
+    currentGameState.assignRandomClientAsGhoul();
 
     //initialize remainingPlayers property in GameState
-    let gameState = gameStates.get(currentClientState.roomID);
-    gameState.remainingPlayers = gameState.clientStates.size - 1; //-2 because ghoul is not a remiaining player
+    currentGameState.remainingPlayers = currentGameState.clientStates.size - 1; //-2 because ghoul is not a remiaining player
 
     // let each similar client know their role and alert them of game start
-    for (let clientState of similarClientStates) {
+    similarClientStates.map(function(clientState) {
       clientState.websocketConnection.send(JSON.stringify({
         action: "game_started",
         role: clientState.role
       }));
-    }
+    });
 
     // alert the current client and also tell the client his role
     currentClientState.websocketConnection.send(JSON.stringify({
@@ -186,15 +200,15 @@ function handleWS_onMessage(message) {
   // ghoul has hidden the treasure. Let users know that they can now play and move around
   if (jsonPayload.action == "treasure_hidden") {
 
-    let similarClientStates = getSimilarClientStates(currentClientState.clientID);
+    let similarClientStates = currentGameState.getSimilarClientStates(currentClientState.clientID);
 
     // let each similar client know their role and alert them of game start
-    for (let clientState of similarClientStates) {
+    similarClientStates.map(function(clientState) {
       clientState.websocketConnection.send(JSON.stringify({
         action: "allow_player_movement",
         searchable: jsonPayload.searchable
       }));
-    }
+    });
 
     // alert the current client and also tell the client his role
     currentClientState.websocketConnection.send(JSON.stringify({
@@ -213,64 +227,60 @@ function handleWS_onMessage(message) {
   if (jsonPayload.action == "update_location") {
 
     currentClientState.location = jsonPayload.location;
-    let gameState = gameStates.get(currentClientState.roomID);
 
     // if the player is the ghoul, compare their location with all players
-    let similarClientState = null;
+    let similarClientStates = currentGameState.getSimilarClientStates(currentClientState.clientID);
     if (currentClientState.role == "ghoul") {
-      for (let similarClientID of jsonPayload.similarClients) {
-        similarClientState = getClientState(similarClientID);
-        if (similarClientState.location == currentClientState.location) { //let player know they were killed
-          similarClientState.websocketConnection.send(JSON.stringify({
+      similarClientStates.map(function(clientState) {
+
+        if (clientState.location == currentClientState.location) { //let player know they were killed
+          clientState.websocketConnection.send(JSON.stringify({
             action: "killed_by_ghoul"
           }));
           currentClientState.websocketConnection.send(JSON.stringify({ //let ghoul know he killed someone
             action: "killed_a_player",
-            killedClient: similarClientState.clientID
+            killedClient: clientState.clientID
           }));
 
           // decrement remainingPlayers each time ghoul kills a player
-          gameState.remainingPlayers--;
+          currentGameState.remainingPlayers--;
         }
-      }
+      });
     }
     // if the player is not a ghoul, compare their location to the ghoul
     else {
-      let ghoulClientState = null;
-      for(let similarClientID of jsonPayload.similarClients) {
-        ghoulClientState = getClientState(similarClientID);
-        if (ghoulClientState.role == "ghoul") {
-          if (currentClientState.location == ghoulClientState.location) {
-            currentClientState.websocketConnection.send(JSON.stringify({ //let player know they were killed
-              action: "killed_by_ghoul"
-            }));
-            ghoulClientState.websocketConnection.send(JSON.stringify({ //let ghoul know he killed someone
-              action: "killed_a_player",
-              killedClient: similarClientState.clientID
-            }));
-            gameState.remainingPlayers--;
-          }
-        }
+      let ghoulClientState = currentGameState.getGhoulClientState();
+      if (currentClientState.location == ghoulClientState.location) {
+        currentClientState.websocketConnection.send(JSON.stringify({ //let player know they were killed
+          action: "killed_by_ghoul"
+        }));
+        ghoulClientState.websocketConnection.send(JSON.stringify({ //let ghoul know he killed someone
+          action: "killed_a_player",
+          killedClient: similarClientState.clientID
+        }));
+        currentGameState.remainingPlayers--;
       }
     }
 
-    if(gameState.remainingPlayers == 0) {
-      let similarClientStates = getSimilarClientStates(currentClientState.clientID);
-      //let all clients know that the game is over
-      for (let similarClientState of similarClientStates) {
-        if (similarClientState.role == "ghoul")
-          similarClientState.websocketConnection.send(JSON.stringify({
+    if(currentGameState.remainingPlayers == 0) {
+
+      //let all similar clients know that the game is over and ghoul wins
+      similarClientStates.map(function(clientState) {
+        if (clientState.role == "ghoul") {
+          clientState.websocketConnection.send(JSON.stringify({
             action: "game_over_ghoul_wins",
             isWinner: true
           }));
+        }
         else {
-          similarClientState.websocketConnection.send(JSON.stringify({
+          clientState.websocketConnection.send(JSON.stringify({
             action: "game_over_ghoul_wins",
             isWinner: false
           }));
         }
-      }
+      });
 
+      // let the current client know that the game is over and ghoul wins
       if (currentClientState.role == "ghoul") {
         currentClientState.websocketConnection.send(JSON.stringify({
           action: "game_over_ghoul_wins",
@@ -283,24 +293,24 @@ function handleWS_onMessage(message) {
           isWinner: false
         }));
       }
-
     }
-
   }
 
 
 
+  // the only way the player_wins conditional is triggered is if a player
+  // client wins. Ghoul clients cannot send a 'player_wins' action
   if (jsonPayload.action == "player_wins") {
 
-    let similarClientStates = getSimilarClientStates(currentClientState.clientID);
     currentClientState.websocketConnection.send(JSON.stringify({
       action: "game_over_player_wins",
       isWinner: true
     }));
 
-    for (let clientState of similarClientStates) {
+    let similarClientStates = currentGameState.getSimilarClientStates(currentClientState.clientID);
+    similarClientStates.map(function(clientState) {
 
-
+      // let the ghoul know that he lost
       if (clientState.role == "ghoul") {
         clientState.websocketConnection.send(JSON.stringify({
           action: "game_over_player_wins",
@@ -313,6 +323,34 @@ function handleWS_onMessage(message) {
           isWinner: true
         }));
       }
+    });
+  }
+
+  if (jsonPayload.action == "play_again" || jsonPayload.action == "quit_game") {
+
+    // reset role and location regardless of button
+    currentClientState.role = "player";
+    currentClientState.location = null;
+
+    // for quitting, remove client from mappings and reset roomID
+    if (jsonPayload.action == "quit_game") {
+
+      // let all similar clients know that a player in their room has quit
+      let similarClientStates = currentGameState.getSimilarClientStates(currentClientState.clientID);
+      similarClientStates.map(function(clientState) {
+
+        clientState.websocketConnection.send(JSON.stringify({
+          action: "player_quit",
+          quitterID: currentClientState.clientID
+        }));
+      });
+
+      currentClientState.roomID = null;
+      let roomID = clientID2RoomMapping.get(currentClientState.clientID);
+      roomID2GameStateMapping.get(roomID).removeClientState(currentClientState.clientID);
+      clientID2RoomMapping.delete(currentClientState.clientID);
+
+
     }
   }
 
